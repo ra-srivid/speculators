@@ -11,6 +11,7 @@ before saving.
 """
 
 from pathlib import Path
+from typing import Any, ClassVar
 
 import torch
 from loguru import logger
@@ -59,7 +60,14 @@ class DFlashConverter:
 
     Copies the draft transformer body as-is and fills the embedding, LM head, and
     verifier norm from the verifier model so the saved checkpoint is self-contained.
+    Subclasses for other DFlash-family algorithms override the class attributes and
+    ``_algorithm_config_fields``.
     """
+
+    algorithm: ClassVar[str] = "dflash"
+    config_class: ClassVar[type[DFlashSpeculatorConfig]] = DFlashSpeculatorConfig
+    model_class: ClassVar[type[DFlashDraftModel]] = DFlashDraftModel
+    non_transformer_keys: ClassVar[frozenset[str]] = _NON_TRANSFORMER_KEYS
 
     def convert(
         self,
@@ -70,7 +78,7 @@ class DFlashConverter:
         aux_hidden_state_layer_ids: list[int] | None = None,
         cache_dir: str | Path | None = None,
     ) -> None:
-        logger.info(f"Converting DFlash checkpoint: {input_path}")
+        logger.info(f"Converting {self.algorithm} checkpoint: {input_path}")
 
         local_checkpoint_path = ensure_checkpoint_is_local(input_path, cache_dir)
         source_config = load_checkpoint_config(local_checkpoint_path)
@@ -102,7 +110,7 @@ class DFlashConverter:
                 "and `dflash_config`)"
             )
         transformer_config = {
-            k: v for k, v in source_config.items() if k not in _NON_TRANSFORMER_KEYS
+            k: v for k, v in source_config.items() if k not in self.non_transformer_keys
         }
 
         verifier_config_dict, _ = PretrainedConfig.get_config_dict(base_model)
@@ -114,7 +122,7 @@ class DFlashConverter:
         target_hidden = verifier_text_config.get("hidden_size")
         if source_hidden and target_hidden and source_hidden != target_hidden:
             raise ValueError(
-                f"Architecture mismatch: source DFlash checkpoint has "
+                f"Architecture mismatch: source {self.algorithm} checkpoint has "
                 f"hidden_size={source_hidden} but base_model '{base_model}' has "
                 f"hidden_size={target_hidden}. Dimensions must match."
             )
@@ -138,7 +146,7 @@ class DFlashConverter:
             ]
 
         speculators_config = SpeculatorsConfig(
-            algorithm="dflash",
+            algorithm=self.algorithm,
             proposal_methods=[
                 GreedyTokenProposalConfig(
                     speculative_tokens=block_size - 1,
@@ -151,7 +159,7 @@ class DFlashConverter:
             ),
         )
 
-        return DFlashSpeculatorConfig(
+        return self.config_class(
             transformer_layer_config=transformer_config,  # type: ignore[arg-type]
             draft_vocab_size=transformer_config["vocab_size"],
             block_size=block_size,
@@ -161,7 +169,16 @@ class DFlashConverter:
                 source_config, transformer_config
             ),
             speculators_config=speculators_config,
+            **self._algorithm_config_fields(source_config, transformer_config),
         )
+
+    def _algorithm_config_fields(
+        self,
+        source_config: dict,  # noqa: ARG002
+        transformer_config: dict,  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """Algorithm-specific speculator config fields read from the source."""
+        return {}
 
     def _layer_causality(
         self, source_config: dict, transformer_config: dict
@@ -175,7 +192,7 @@ class DFlashConverter:
         override = source_config.get("is_causal")
         if override is None:
             override = source_config.get("dflash_config", {}).get("causal")
-        layer_types = DFlashSpeculatorConfig.validate_transformer_config(
+        layer_types = self.config_class.validate_transformer_config(
             dict(transformer_config)
         ).layer_types
         causal = [
@@ -207,7 +224,7 @@ class DFlashConverter:
         ):
             raise ValueError(
                 "Checkpoint marks full-attention draft layers causal, but "
-                "DFlashDraftModel always runs them bidirectionally "
+                f"{self.model_class.__name__} always runs them bidirectionally "
                 f"(layer_types={layer_types})."
             )
         return False
@@ -279,7 +296,7 @@ class DFlashConverter:
         weights: dict[str, torch.Tensor],
         output_path: str | Path,
     ) -> Path:
-        model = DFlashDraftModel(config=config)
+        model = self.model_class(config=config)
 
         body = {k: v for k, v in weights.items() if k not in ("t2d", "d2t")}
         body = self._remap_weights(body, config, model)
@@ -287,7 +304,7 @@ class DFlashConverter:
         if unexpected:
             raise ValueError(
                 "Unexpected keys in checkpoint -- the structure does not match "
-                f"DFlashDraftModel. Unexpected keys: {unexpected}"
+                f"{self.model_class.__name__}. Unexpected keys: {unexpected}"
             )
         critical_missing = [k for k in missing if k not in _VERIFIER_FILLED_KEYS]
         if critical_missing:
@@ -303,9 +320,9 @@ class DFlashConverter:
         return Path(output_path)
 
     def _validate(self, output_path: Path) -> None:
-        logger.info("Validating converted DFlash checkpoint...")
+        logger.info(f"Validating converted {self.algorithm} checkpoint...")
         try:
-            model = DFlashDraftModel.from_pretrained(str(output_path))
+            model = self.model_class.from_pretrained(str(output_path))
         except (OSError, ValueError, RuntimeError) as exc:
             logger.error(f"Validation failed: {exc}")
             raise

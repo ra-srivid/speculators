@@ -51,6 +51,8 @@ All [DFlash](dflash.md) backbone parameters also apply. DFlash2 defaults to five
 
 To train your own, see `examples/train/dflash2_qwen3_8b_ultrachat_online_5k.sh`.
 
+To fine-tune a published Z Lab-format checkpoint (e.g. `z-lab/Qwen3.8-27B-DFlash2`), pass it to `--from-pretrained`; it is converted to a speculators checkpoint automatically. To convert it ahead of time, run `speculators convert <checkpoint> --algorithm dflash2 --verifier <verifier>`. Conversion rejects checkpoints that rely on settings the training model does not implement, such as a non-default `output_multiplier` or `final_logit_softcapping`, MLA attention, or causal full-attention layers.
+
 ## Serving
 
 Checkpoints emitted here follow the public Z Lab weight contract but use a speculators config. They can be served in vLLM using `vllm serve ./checkpoint`.
